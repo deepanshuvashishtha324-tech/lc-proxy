@@ -15,70 +15,85 @@ app.get('/', (req, res) => {
 
 // Fetch user stats (Improved)
 app.get('/leetcode/:username', async (req, res) => {
-  const { username } = req.params;
-
-  // Helper function to minimize repetition
-  const fetchLeetCode = (query, variables) => {
-    return fetch('https://leetcode.com/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://leetcode.com',
-      },
-      body: JSON.stringify({ query, variables }),
-    }).then(r => r.json());
-  };
+  const { username } = req.params
 
   try {
-    // Execute both requests in parallel
-    const [statsData, probData] = await Promise.all([
-      fetchLeetCode(`
-        query getUserProfile($username: String!) {
+    // Get User Stats
+    const statsRes = await fetch('https://leetcode.com/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({
+        query: `query getUserProfile($username: String!) {
           matchedUser(username: $username) {
-            username
-            profile { realName }
-            submitStatsGlobal {
-              acSubmissionNum { difficulty count }
+            username profile { realName }
+            submitStatsGlobal { acSubmissionNum { difficulty count } }
+          }
+        }`,
+        variables: { username }
+      })
+    })
+
+    const statsData = await statsRes.json()
+    const user = statsData.data?.matchedUser
+    if (!user) return res.status(404).json({ error: 'User not found' })
+
+    const statsArr = user.submitStatsGlobal?.acSubmissionNum || []
+    const easy = statsArr.find(s => s.difficulty === 'Easy')?.count || 0
+    const medium = statsArr.find(s => s.difficulty === 'Medium')?.count || 0
+    const hard = statsArr.find(s => s.difficulty === 'Hard')?.count || 0
+    const total = easy + medium + hard
+
+    // Pagination + All Problems
+    const allProblems = []
+    let offset = 0
+    const PAGE_SIZE = 100
+
+    while (true) {
+      const probRes = await fetch('https://leetcode.com/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+        body: JSON.stringify({
+          query: `query problemsetQuestionList($limit: Int!, $offset: Int!) {
+            problemsetQuestionList(limit: $limit, offset: $offset) {
+              questions { title titleSlug difficulty }
             }
-          }
-        }`, { username }),
-      fetchLeetCode(`
-        query getRecentAcSubmissions($username: String!, $limit: Int!) {
-          recentAcSubmissionList(username: $username, limit: $limit) {
-            id title titleSlug difficulty
-          }
-        }`, { username, limit: 100 })
-    ]);
+          }`,
+          variables: { limit: PAGE_SIZE, offset }
+        })
+      })
 
-    const user = statsData.data?.matchedUser;
-    if (!user) return res.status(404).json({ error: 'User not found' });
+      const data = await probRes.json()
+      const questions = data.data?.problemsetQuestionList?.questions || []
 
-    const statsArr = user.submitStatsGlobal?.acSubmissionNum || [];
-    const easy = statsArr.find(s => s.difficulty === 'Easy')?.count || 0;
-    const medium = statsArr.find(s => s.difficulty === 'Medium')?.count || 0;
-    const hard = statsArr.find(s => s.difficulty === 'Hard')?.count || 0;
+      if (!questions.length) break
 
-    const problems = probData.data?.recentAcSubmissionList || [];
+      questions.forEach(q => {
+        allProblems.push({
+          name: q.title,
+          slug: q.titleSlug,
+          difficulty: q.difficulty
+        })
+      })
+
+      if (questions.length < PAGE_SIZE) break
+      offset += PAGE_SIZE
+
+      await new Promise(r => setTimeout(r, 300)) // Avoid rate limit
+    }
 
     res.json({
       username: user.username,
       name: user.profile?.realName || '',
-      stats: { easy, medium, hard, total: easy + medium + hard },
-      problems: problems.map(p => ({
-        id: p.id,
-        name: p.title,
-        slug: p.titleSlug,
-        difficulty: p.difficulty,
-      })),
-      message: `Found ${problems.length} recent solved problems for @${username}`
-    });
+      stats: { easy, medium, hard, total },
+      problems: allProblems,
+     message: `Found ${allProblems.length} problems for @${username}`
+    })
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch LeetCode data' });
+    console.error(err)
+    res.status(500).json({ error: 'Failed to fetch data' })
   }
-});
+})
 app.listen(PORT, () => {
   console.log(`✅ LeetCode Proxy running on port ${PORT}`)
 })
